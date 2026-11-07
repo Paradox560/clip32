@@ -59,6 +59,7 @@ struct SettingsView: View {
                         Text("History limit")
                         Spacer()
                         TextField("Items", value: $capacityDraft, format: .number.grouping(.never))
+                            .labelsHidden().textFieldStyle(.roundedBorder)
                             .multilineTextAlignment(.trailing).frame(width: 54)
                             .accessibilityLabel("Number of clipboard items")
                             .onSubmit { requestCapacityChange() }
