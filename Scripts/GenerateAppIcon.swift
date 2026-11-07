@@ -23,38 +23,103 @@ func drawIcon(size: Int) throws -> Data {
     context.cgContext.scaleBy(x: CGFloat(size) / 1024, y: CGFloat(size) / 1024)
 
     let silhouette = NSBezierPath(roundedRect: NSRect(x: 80, y: 80, width: 864, height: 864), xRadius: 190, yRadius: 190)
-    NSGradient(starting: NSColor(srgbRed: 0.44, green: 0.44, blue: 0.94, alpha: 1),
-               ending: NSColor(srgbRed: 0.27, green: 0.28, blue: 0.74, alpha: 1))?.draw(in: silhouette, angle: -90)
+    NSGradient(starting: NSColor(srgbRed: 0.24, green: 0.43, blue: 0.33, alpha: 1),
+               ending: NSColor(srgbRed: 0.12, green: 0.29, blue: 0.22, alpha: 1))?.draw(in: silhouette, angle: -90)
 
-    NSColor.white.withAlphaComponent(0.22).setFill()
-    NSBezierPath(roundedRect: NSRect(x: 322, y: 228, width: 440, height: 528), xRadius: 48, yRadius: 48).fill()
-
+    // A second sheet and the gently lifted front edge make the mark feel like
+    // stationery. Everything is vector-drawn, including the wire paperclip.
     NSGraphicsContext.saveGraphicsState()
-    let shadow = NSShadow()
-    shadow.shadowColor = NSColor(srgbRed: 0.1, green: 0.1, blue: 0.35, alpha: 0.2)
-    shadow.shadowBlurRadius = 28
-    shadow.shadowOffset = NSSize(width: 0, height: -12)
-    shadow.set()
-    NSColor(srgbRed: 0.98, green: 0.98, blue: 1, alpha: 1).setFill()
-    NSBezierPath(roundedRect: NSRect(x: 256, y: 280, width: 448, height: 524), xRadius: 48, yRadius: 48).fill()
+    let rearTransform = AffineTransform(translationByX: 522, byY: 506)
+    var rotation = rearTransform
+    rotation.rotate(byDegrees: -8)
+    rotation.translate(x: -522, y: -506)
+    let rearSheet = NSBezierPath(roundedRect: NSRect(x: 290, y: 220, width: 482, height: 606), xRadius: 28, yRadius: 28)
+    rearSheet.transform(using: rotation)
+    let rearShadow = NSShadow()
+    rearShadow.shadowColor = NSColor.black.withAlphaComponent(0.19)
+    rearShadow.shadowBlurRadius = 28
+    rearShadow.shadowOffset = NSSize(width: 0, height: -15)
+    rearShadow.set()
+    NSColor(srgbRed: 0.77, green: 0.81, blue: 0.72, alpha: 1).setFill()
+    rearSheet.fill()
     NSGraphicsContext.restoreGraphicsState()
 
-    NSColor(srgbRed: 0.31, green: 0.32, blue: 0.79, alpha: 1).setFill()
-    NSBezierPath(roundedRect: NSRect(x: 378, y: 750, width: 204, height: 82), xRadius: 28, yRadius: 28).fill()
-    NSColor.white.withAlphaComponent(0.85).setFill()
-    NSBezierPath(roundedRect: NSRect(x: 444, y: 780, width: 72, height: 15), xRadius: 7.5, yRadius: 7.5).fill()
+    let sheet = NSBezierPath()
+    sheet.move(to: NSPoint(x: 282, y: 250))
+    sheet.line(to: NSPoint(x: 700, y: 250))
+    sheet.curve(to: NSPoint(x: 726, y: 276), controlPoint1: NSPoint(x: 716, y: 250), controlPoint2: NSPoint(x: 726, y: 260))
+    sheet.line(to: NSPoint(x: 726, y: 744))
+    sheet.line(to: NSPoint(x: 630, y: 840))
+    sheet.line(to: NSPoint(x: 282, y: 840))
+    sheet.curve(to: NSPoint(x: 256, y: 814), controlPoint1: NSPoint(x: 266, y: 840), controlPoint2: NSPoint(x: 256, y: 830))
+    sheet.line(to: NSPoint(x: 256, y: 276))
+    sheet.curve(to: NSPoint(x: 282, y: 250), controlPoint1: NSPoint(x: 256, y: 260), controlPoint2: NSPoint(x: 266, y: 250))
+    sheet.close()
 
-    NSColor(srgbRed: 0.81, green: 0.82, blue: 0.94, alpha: 1).setFill()
-    NSBezierPath(roundedRect: NSRect(x: 332, y: 635, width: 290, height: 20), xRadius: 10, yRadius: 10).fill()
-    NSBezierPath(roundedRect: NSRect(x: 332, y: 583, width: 210, height: 20), xRadius: 10, yRadius: 10).fill()
+    NSGraphicsContext.saveGraphicsState()
+    let paperShadow = NSShadow()
+    paperShadow.shadowColor = NSColor(srgbRed: 0.05, green: 0.16, blue: 0.10, alpha: 0.28)
+    paperShadow.shadowBlurRadius = 30
+    paperShadow.shadowOffset = NSSize(width: 0, height: -16)
+    paperShadow.set()
+    NSColor(srgbRed: 0.97, green: 0.955, blue: 0.90, alpha: 1).setFill()
+    sheet.fill()
+    NSGraphicsContext.restoreGraphicsState()
 
-    let font = NSFont.monospacedDigitSystemFont(ofSize: 184, weight: .semibold)
-    let number = NSAttributedString(string: "32", attributes: [
-        .font: font,
-        .foregroundColor: NSColor(srgbRed: 0.30, green: 0.31, blue: 0.77, alpha: 1),
-        .kern: -8
-    ])
-    number.draw(at: NSPoint(x: 480 - number.size().width / 2, y: 332))
+    // Very restrained, deterministic paper fibers. They disappear naturally
+    // at small icon sizes rather than becoming visible visual noise.
+    NSGraphicsContext.saveGraphicsState()
+    sheet.addClip()
+    var seed: UInt64 = 0x5041504552
+    for _ in 0..<4_200 {
+        seed = seed &* 6_364_136_223_846_793_005 &+ 1
+        let x = 256 + CGFloat((seed >> 24) % 470_000) / 1_000
+        seed = seed &* 6_364_136_223_846_793_005 &+ 1
+        let y = 250 + CGFloat((seed >> 24) % 590_000) / 1_000
+        NSColor(srgbRed: 0.36, green: 0.39, blue: 0.29, alpha: 0.045).setFill()
+        NSRect(x: x, y: y, width: 0.7, height: 1.4).fill()
+    }
+    NSGraphicsContext.restoreGraphicsState()
+
+    let fold = NSBezierPath()
+    fold.move(to: NSPoint(x: 630, y: 840))
+    fold.line(to: NSPoint(x: 630, y: 768))
+    fold.curve(to: NSPoint(x: 654, y: 744), controlPoint1: NSPoint(x: 630, y: 752), controlPoint2: NSPoint(x: 638, y: 744))
+    fold.line(to: NSPoint(x: 726, y: 744))
+    fold.close()
+    NSColor(srgbRed: 0.83, green: 0.84, blue: 0.76, alpha: 1).setFill()
+    fold.fill()
+
+    // Quiet pencil-like rules leave the sheet recognizably paper without type.
+    NSColor(srgbRed: 0.58, green: 0.66, blue: 0.55, alpha: 0.32).setFill()
+    for (y, width) in [(488.0, 270.0), (432.0, 270.0), (376.0, 188.0)] {
+        NSBezierPath(roundedRect: NSRect(x: 332, y: y, width: width, height: 12), xRadius: 6, yRadius: 6).fill()
+    }
+
+    let clip = NSBezierPath()
+    clip.move(to: NSPoint(x: 443, y: 772))
+    clip.line(to: NSPoint(x: 443, y: 635))
+    clip.curve(to: NSPoint(x: 395, y: 635), controlPoint1: NSPoint(x: 443, y: 601), controlPoint2: NSPoint(x: 395, y: 601))
+    clip.line(to: NSPoint(x: 395, y: 818))
+    clip.curve(to: NSPoint(x: 479, y: 818), controlPoint1: NSPoint(x: 395, y: 875), controlPoint2: NSPoint(x: 479, y: 875))
+    clip.line(to: NSPoint(x: 479, y: 624))
+    clip.curve(to: NSPoint(x: 359, y: 624), controlPoint1: NSPoint(x: 479, y: 540), controlPoint2: NSPoint(x: 359, y: 540))
+    clip.line(to: NSPoint(x: 359, y: 786))
+    clip.lineWidth = 21
+    clip.lineCapStyle = .round
+    clip.lineJoinStyle = .round
+    NSGraphicsContext.saveGraphicsState()
+    let clipShadow = NSShadow()
+    clipShadow.shadowColor = NSColor(srgbRed: 0.13, green: 0.22, blue: 0.13, alpha: 0.22)
+    clipShadow.shadowBlurRadius = 8
+    clipShadow.shadowOffset = NSSize(width: 3, height: -6)
+    clipShadow.set()
+    NSColor(srgbRed: 0.20, green: 0.40, blue: 0.29, alpha: 1).setStroke()
+    clip.stroke()
+    NSGraphicsContext.restoreGraphicsState()
+    clip.lineWidth = 7
+    NSColor(srgbRed: 0.60, green: 0.72, blue: 0.56, alpha: 0.85).setStroke()
+    clip.stroke()
 
     NSGraphicsContext.restoreGraphicsState()
     guard let data = bitmap.representation(using: .png, properties: [:]) else {
