@@ -12,21 +12,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem!
     private var panel: HistoryPanel!
     private var settingsWindow: NSWindow?
+    private var setupWindow: NSWindow?
+    private var installWindow: NSWindow?
     private var keyMonitor: Any?
     private var activationObserver: NSObjectProtocol?
     private var lastExternalApplication: NSRunningApplication?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let demo = CommandLine.arguments.contains("--demo")
-        if !demo, let bundleID = Bundle.main.bundleIdentifier,
-           NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).contains(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
-            NSApp.terminate(nil)
+        if demo, let flag = CommandLine.arguments.firstIndex(of: "--appearance"), CommandLine.arguments.count > flag + 1 {
+            NSApp.appearance = NSAppearance(named: CommandLine.arguments[flag + 1] == "light" ? .aqua : .darkAqua)
+        }
+        let bundlePath = Bundle.main.bundlePath
+        if !demo && (bundlePath.hasPrefix("/Volumes/") || bundlePath.contains("/AppTranslocation/")) {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 330), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "Install Clip32"
+            window.isReleasedWhenClosed = false
+            window.delegate = self
+            window.contentView = NSHostingView(rootView: InstallLocationView())
+            window.center()
+            installWindow = window
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
             return
+        }
+        if !demo, let bundleID = Bundle.main.bundleIdentifier {
+            let peers = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+                .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            for peer in peers {
+                let path = peer.bundleURL?.path ?? ""
+                if path.hasPrefix("/Volumes/") || path.contains("/AppTranslocation/") {
+                    // A disk-image installation guide must not block the installed copy.
+                    _ = peer.terminate()
+                } else {
+                    peer.activate(options: [.activateIgnoringOtherApps])
+                    NSApp.terminate(nil)
+                    return
+                }
+            }
         }
         model = AppModel(demo: demo)
         model.showHistory = { [weak self] in self?.toggleHistory() }
         model.dismissHistory = { [weak self] in self?.panel.orderOut(nil) }
         model.showSettings = { [weak self] in self?.openSettings() }
+        model.showSetup = { [weak self] in self?.openSetup() }
         lastExternalApplication = NSWorkspace.shared.frontmostApplication
         buildApplicationMenu()
         buildMenuBar()
@@ -48,10 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         let defaults = UserDefaults.standard
-        if demo || !defaults.bool(forKey: "hasShownWelcome") {
-            if !demo { defaults.set(true, forKey: "hasShownWelcome") }
-            showHistory()
-        }
+        if demo { showHistory() }
+        else if !defaults.bool(forKey: "hasShownWelcome") { openSetup() }
         if demo, let flag = CommandLine.arguments.firstIndex(of: "--render-preview"), CommandLine.arguments.count > flag + 1 {
             let folder = URL(fileURLWithPath: CommandLine.arguments[flag + 1], isDirectory: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
@@ -69,6 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if let installWindow { installWindow.makeKeyAndOrderFront(nil); return true }
+        if let setupWindow, setupWindow.isVisible { setupWindow.makeKeyAndOrderFront(nil); return true }
         showHistory()
         return true
     }
@@ -91,6 +120,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let settings = NSMenuItem(title: "Settings…", action: #selector(menuSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(settings)
+        let setup = NSMenuItem(title: "Setup Guide…", action: #selector(menuSetup), keyEquivalent: "")
+        setup.target = self
+        appMenu.addItem(setup)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Clip32", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
@@ -155,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             menu.addItem(withTitle: model.monitor.isPaused ? "Resume capture" : "Pause capture", action: #selector(togglePause), keyEquivalent: "")
             menu.addItem(.separator())
             menu.addItem(withTitle: "Settings…", action: #selector(menuSettings), keyEquivalent: ",")
+            menu.addItem(withTitle: "Setup Guide…", action: #selector(menuSetup), keyEquivalent: "")
             menu.addItem(withTitle: "Quit Clip32", action: #selector(quit), keyEquivalent: "q")
             menu.items.forEach { $0.target = self }
             statusItem.menu = menu
@@ -165,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func menuShowHistory() { showHistory() }
     @objc private func menuSettings() { openSettings() }
+    @objc private func menuSetup() { openSetup() }
     @objc private func togglePause() { model.monitor.isPaused.toggle() }
     @objc private func quit() { NSApp.terminate(nil) }
 
@@ -210,9 +244,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
+    private func openSetup() {
+        panel.orderOut(nil)
+        settingsWindow?.orderOut(nil)
+        if setupWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 490, height: 550), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "Welcome to Clip32"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: SetupView(model: model) { [weak self] in
+                guard let self else { return }
+                if !self.model.isDemo { UserDefaults.standard.set(true, forKey: "hasShownWelcome") }
+                self.setupWindow?.orderOut(nil)
+                self.showHistory()
+            })
+            window.center()
+            setupWindow = window
+        }
+        model.refreshPermissions()
+        NSApp.activate(ignoringOtherApps: true)
+        setupWindow?.makeKeyAndOrderFront(nil)
+    }
+
     func windowDidResignKey(_ notification: Notification) {
         guard notification.object as? NSWindow === panel else { return }
         panel.orderOut(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if notification.object as? NSWindow === installWindow { NSApp.terminate(nil) }
     }
 
     private func renderPreview(to folder: URL) {
@@ -224,9 +283,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 guard let self else { return }
                 do {
                     try self.render(self.settingsWindow?.contentView, to: folder.appendingPathComponent("settings.png"))
-                    print("Rendered history.png and settings.png")
-                } catch { fputs("Preview failed: \(error)\n", stderr) }
-                NSApp.terminate(nil)
+                    self.openSetup()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        do { try self.render(self.setupWindow?.contentView, to: folder.appendingPathComponent("setup.png")) }
+                        catch { fputs("Setup preview failed: \(error)\n", stderr) }
+                        print("Rendered history.png, settings.png, and setup.png")
+                        NSApp.terminate(nil)
+                    }
+                } catch {
+                    fputs("Preview failed: \(error)\n", stderr)
+                    NSApp.terminate(nil)
+                }
             }
         } catch {
             fputs("Preview failed: \(error)\n", stderr)
