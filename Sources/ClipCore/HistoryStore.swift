@@ -3,51 +3,90 @@ import Foundation
 
 @MainActor
 public final class HistoryStore: ObservableObject {
-    public static let capacity = 32
+    public static let defaultCapacity = 32
+    public static let minimumCapacity = 1
+    public static let maximumCapacity = 256
     public static let maximumEntryBytes = 16 * 1_024 * 1_024
+    /// The original 32 × 16 MiB maximum also bounds larger, configurable histories.
+    public static let maximumHistoryBytes = 512 * 1_024 * 1_024
 
     @Published public private(set) var entries: [ClipboardEntry] = []
+    @Published public private(set) var capacity = HistoryStore.defaultCapacity
     @Published public private(set) var errorMessage: String?
+
+    public var totalBytes: Int { entries.reduce(0) { $0 + $1.byteCount } }
 
     public let directory: URL
     public var historyURL: URL { directory.appendingPathComponent("history.plist") }
 
     private let fileManager: FileManager
+    private let historyByteLimit: Int
     private var canPersist = true
     private var generation = 0
     private lazy var writer = HistoryPersistenceWriter(directory: directory, fileManager: fileManager) { [weak self] result in
         Task { @MainActor [weak self] in self?.finishSave(result) }
     }
 
-    public init(directory: URL? = nil, fileManager: FileManager = .default) {
+    public convenience init(directory: URL? = nil, fileManager: FileManager = .default) {
+        self.init(directory: directory, fileManager: fileManager, historyByteLimit: Self.maximumHistoryBytes)
+    }
+
+    /// An internal budget override keeps boundary tests small and deterministic.
+    init(directory: URL?, fileManager: FileManager, historyByteLimit: Int) {
         self.fileManager = fileManager
+        self.historyByteLimit = max(1, min(historyByteLimit, Self.maximumHistoryBytes))
         self.directory = directory ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Clip32", isDirectory: true)
         load()
+    }
+
+    /// Pinned items must be explicitly unpinned before lowering the limit past them.
+    @discardableResult
+    public func setCapacity(_ requestedCapacity: Int) -> Bool {
+        guard (Self.minimumCapacity...Self.maximumCapacity).contains(requestedCapacity) else {
+            reportValidationError("Choose a history size from \(Self.minimumCapacity) to \(Self.maximumCapacity) items.")
+            return false
+        }
+        let pinnedCount = entries.filter(\.isPinned).count
+        guard requestedCapacity >= pinnedCount else {
+            reportValidationError("You have \(pinnedCount) pinned items. Unpin or delete some before lowering the history size to \(requestedCapacity).")
+            return false
+        }
+        var updatedEntries = entries
+        while updatedEntries.count > requestedCapacity {
+            guard let index = updatedEntries.indices.reversed().first(where: { !updatedEntries[$0].isPinned }) else { return false }
+            updatedEntries.remove(at: index)
+        }
+        capacity = requestedCapacity
+        entries = updatedEntries
+        save()
+        return true
     }
 
     @discardableResult
     public func insert(_ entry: ClipboardEntry) -> Bool {
         guard !entry.items.isEmpty, entry.items.allSatisfy({ !$0.representations.isEmpty }) else { return false }
         guard entry.byteCount <= Self.maximumEntryBytes else {
-            generation += 1
-            errorMessage = "This item is larger than 16 MB and was not saved. Your current clipboard is unchanged."
+            reportValidationError("This item is larger than 16 MB and was not saved. Your current clipboard is unchanged.")
             return false
         }
         let matchingEntry = entries.first(where: { $0.hasSameContent(as: entry) })
-        guard matchingEntry != nil || entries.count < Self.capacity || entries.contains(where: { !$0.isPinned }) else {
-            generation += 1
-            errorMessage = "All 32 entries are pinned. Unpin or delete an entry to save new copies."
-            return false
-        }
         var newestEntry = entry
         if let matchingEntry {
             newestEntry.id = matchingEntry.id
             newestEntry.isPinned = matchingEntry.isPinned
         }
         var updatedEntries = entries.filter { !$0.hasSameContent(as: entry) }
-        while updatedEntries.count >= Self.capacity {
-            guard let index = updatedEntries.indices.reversed().first(where: { !updatedEntries[$0].isPinned }) else { return false }
-            updatedEntries.remove(at: index)
+        var updatedBytes = updatedEntries.reduce(0) { $0 + $1.byteCount }
+        while updatedEntries.count >= capacity || updatedBytes + newestEntry.byteCount > historyByteLimit {
+            guard let index = updatedEntries.indices.reversed().first(where: { !updatedEntries[$0].isPinned }) else {
+                if updatedEntries.count >= capacity {
+                    reportValidationError("All \(capacity) entries are pinned. Unpin or delete an entry to save new copies.")
+                } else {
+                    reportValidationError("This copy cannot fit within the 512 MB history budget without removing pinned items. Unpin or delete an item to make room.")
+                }
+                return false
+            }
+            updatedBytes -= updatedEntries.remove(at: index).byteCount
         }
         updatedEntries.insert(newestEntry, at: 0)
         entries = updatedEntries
@@ -89,20 +128,30 @@ public final class HistoryStore: ObservableObject {
         do {
             let attributes = try fileManager.attributesOfItem(atPath: historyURL.path)
             let byteCount = (attributes[.size] as? NSNumber)?.uint64Value ?? UInt64.max
-            // Allow bounded metadata overhead in addition to the 32 payloads.
-            guard byteCount <= UInt64(Self.capacity * Self.maximumEntryBytes + 4 * 1_024 * 1_024) else {
+            // Includes every valid v1 archive, with bounded metadata overhead.
+            guard byteCount <= UInt64(Self.maximumHistoryBytes + 4 * 1_024 * 1_024) else {
                 throw HistoryError.invalidArchive
             }
             let data = try Data(contentsOf: historyURL, options: .mappedIfSafe)
             let archive = try PropertyListDecoder().decode(HistoryArchive.self, from: data)
-            guard archive.version == 1 else {
+            guard archive.version == 1 || archive.version == 2 else {
                 throw HistoryError.unsupportedVersion
             }
+            let savedCapacity: Int
+            if archive.version == 1 {
+                savedCapacity = Self.defaultCapacity
+            } else if let value = archive.capacity, (Self.minimumCapacity...Self.maximumCapacity).contains(value) {
+                savedCapacity = value
+            } else {
+                throw HistoryError.invalidArchive
+            }
             // Validate the archive rather than silently accepting a partially damaged history.
-            guard archive.entries.count <= Self.capacity,
+            guard archive.entries.count <= savedCapacity,
+                  archive.entries.reduce(0, { $0 + $1.byteCount }) <= historyByteLimit,
                   archive.entries.allSatisfy({ !$0.items.isEmpty && $0.byteCount <= Self.maximumEntryBytes && $0.items.allSatisfy({ !$0.representations.isEmpty }) }) else {
                 throw HistoryError.invalidArchive
             }
+            capacity = savedCapacity
             entries = archive.entries
             try protectStorage()
         } catch {
@@ -114,7 +163,12 @@ public final class HistoryStore: ObservableObject {
     private func save() {
         guard canPersist else { return }
         generation += 1
-        writer.submit(entries: entries, generation: generation)
+        writer.submit(entries: entries, capacity: capacity, generation: generation)
+    }
+
+    private func reportValidationError(_ message: String) {
+        generation += 1
+        errorMessage = message
     }
 
     private func finishSave(_ result: HistoryPersistenceWriter.WriteResult) {
@@ -141,6 +195,7 @@ public final class HistoryStore: ObservableObject {
 
 private struct HistoryArchive: Codable {
     let version: Int
+    let capacity: Int?
     let entries: [ClipboardEntry]
 }
 
@@ -154,6 +209,7 @@ private final class HistoryPersistenceWriter: @unchecked Sendable {
 
     private struct Snapshot: Sendable {
         let entries: [ClipboardEntry]
+        let capacity: Int
         let generation: Int
     }
 
@@ -173,9 +229,9 @@ private final class HistoryPersistenceWriter: @unchecked Sendable {
         self.completion = completion
     }
 
-    func submit(entries: [ClipboardEntry], generation: Int) {
+    func submit(entries: [ClipboardEntry], capacity: Int, generation: Int) {
         lock.lock()
-        pending = Snapshot(entries: entries, generation: generation)
+        pending = Snapshot(entries: entries, capacity: capacity, generation: generation)
         let needsScheduling = !isScheduled
         isScheduled = true
         lock.unlock()
@@ -202,7 +258,7 @@ private final class HistoryPersistenceWriter: @unchecked Sendable {
 
             let result: WriteResult
             do {
-                try persist(snapshot.entries)
+                try persist(snapshot.entries, capacity: snapshot.capacity)
                 result = WriteResult(generation: snapshot.generation, errorMessage: nil)
             } catch {
                 result = WriteResult(generation: snapshot.generation, errorMessage: "History could not be saved and is currently kept in memory: \(error.localizedDescription)")
@@ -214,13 +270,13 @@ private final class HistoryPersistenceWriter: @unchecked Sendable {
         }
     }
 
-    private func persist(_ entries: [ClipboardEntry]) throws {
+    private func persist(_ entries: [ClipboardEntry], capacity: Int) throws {
         let historyURL = directory.appendingPathComponent("history.plist")
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
-        let data = try encoder.encode(HistoryArchive(version: 1, entries: entries))
+        let data = try encoder.encode(HistoryArchive(version: 2, capacity: capacity, entries: entries))
         // Write through an owner-only temporary file before replacing the archive.
         let temporaryURL = directory.appendingPathComponent(".history-\(UUID().uuidString).tmp")
         defer { try? fileManager.removeItem(at: temporaryURL) }
