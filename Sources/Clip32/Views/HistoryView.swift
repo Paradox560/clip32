@@ -33,10 +33,7 @@ struct HistoryView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 11).fill(Color.accentColor.opacity(0.12))
-                    Image(systemName: "doc.on.clipboard").font(.system(size: 21, weight: .medium)).foregroundStyle(Color.accentColor)
-                }.frame(width: 44, height: 44).accessibilityHidden(true)
+                PaperClipMark().frame(width: 44, height: 44).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Clip32").font(.system(size: 20, weight: .semibold, design: .rounded))
                     Text("A little more at your fingertips.").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -95,7 +92,7 @@ struct HistoryView: View {
 
             HStack {
                 Text(filter == .pinned ? "PINNED" : "CLIPBOARD HISTORY").font(.system(size: 9, weight: .semibold)).tracking(0.9)
-                Text("\(store.entries.count) / 32").font(.system(size: 10, design: .monospaced))
+                Text("\(store.entries.count) / \(store.capacity)").font(.system(size: 10, design: .monospaced))
                 Spacer()
                 Menu {
                     Button("Clear recent history") { model.clearRecent() }.disabled(store.entries.allSatisfy(\.isPinned))
@@ -175,7 +172,7 @@ struct HistoryView: View {
     private var emptyDescription: String {
         if !query.isEmpty { return "Try another word or switch to All." }
         if filter == .pinned { return "Pin an item from its menu to keep it in your history." }
-        return "Copy text, an image, or a file with ⌘C. Your last 32 items will be right here."
+        return "Copy text, an image, or a file with ⌘C. Your last \(store.capacity) items will be right here."
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {

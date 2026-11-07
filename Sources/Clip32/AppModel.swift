@@ -23,6 +23,7 @@ final class AppModel: ObservableObject {
     var showHistory: (() -> Void)?
     var dismissHistory: (() -> Void)?
     var showSettings: (() -> Void)?
+    var showSetup: (() -> Void)?
     var handleHistoryKey: ((NSEvent) -> Bool)?
     var previousApplication: NSRunningApplication?
     private var observers: [NSObjectProtocol] = []
