@@ -98,9 +98,32 @@ public struct ClipboardEntry: Codable, Equatable, Identifiable, Sendable {
         case .image:
             return "Copied image"
         case .text:
-            let line = searchableText.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-            let compact = line.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            return compact.isEmpty ? "Formatted text" : String(compact.prefix(140))
+            // Build only the displayed portion. Splitting the entire copied text
+            // would scan megabytes on the UI thread just to display 140 characters.
+            var result = ""
+            var count = 0
+            var pendingSpace = false
+            for character in presentationText {
+                if character.isNewline {
+                    if !result.isEmpty { break }
+                    continue
+                }
+                if character.isWhitespace {
+                    if !result.isEmpty { pendingSpace = true }
+                    continue
+                }
+                if pendingSpace {
+                    // Do not leave a trailing separator when the limit is reached.
+                    guard count + 1 < 140 else { break }
+                    result.append(" ")
+                    count += 1
+                    pendingSpace = false
+                }
+                result.append(character)
+                count += 1
+                if count == 140 { break }
+            }
+            return result.isEmpty ? "Formatted text" : result
         }
     }
 
@@ -111,8 +134,46 @@ public struct ClipboardEntry: Codable, Equatable, Identifiable, Sendable {
         case .image:
             return ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
         case .text:
-            return String(searchableText.prefix(800))
+            return String(presentationText.prefix(800))
         }
+    }
+
+    /// Display-only bounds keep long copies cheap to render. The complete payload
+    /// and searchableText remain unchanged. RTF uses the existing importer when no
+    /// plain-text or URL representation is available.
+    private var presentationText: String {
+        var remainingBytes = 16 * 1_024
+        var parts: [String] = []
+        for item in items.prefix(32) {
+            guard remainingBytes > 0 else { break }
+            let text: String?
+            if let plain = item.data(for: .string).flatMap({ Self.boundedUTF8($0, maximumBytes: remainingBytes) }) {
+                text = plain
+            } else if let url = item.data(for: .URL).flatMap({ Self.boundedUTF8($0, maximumBytes: remainingBytes) }) {
+                text = url
+            } else if let data = item.data(for: .rtf),
+                      let attributed = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) {
+                text = String(decoding: attributed.string.utf8.prefix(remainingBytes), as: UTF8.self)
+            } else {
+                text = nil
+            }
+            if let text {
+                parts.append(text)
+                remainingBytes -= text.utf8.count + 1
+            }
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    private static func boundedUTF8(_ data: Data, maximumBytes: Int) -> String? {
+        guard data.count > maximumBytes else { return String(data: data, encoding: .utf8) }
+        let prefix = data.prefix(maximumBytes)
+        // The byte limit may cut through the final UTF-8 scalar. Drop only those
+        // incomplete trailing bytes; malformed content elsewhere remains invalid.
+        for trailingBytes in 0...3 {
+            if let text = String(data: prefix.dropLast(trailingBytes), encoding: .utf8) { return text }
+        }
+        return nil
     }
 
     /// Pasteboard representation order is not part of copied content, but item order is.

@@ -1,4 +1,5 @@
 import Combine
+import Darwin
 import Foundation
 
 @MainActor
@@ -36,6 +37,11 @@ public final class HistoryStore: ObservableObject {
         self.fileManager = fileManager
         self.historyByteLimit = max(1, min(historyByteLimit, Self.maximumHistoryBytes))
         self.directory = directory ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Clip32", isDirectory: true)
+        do {
+            try writer.removeOrphanedTemporaryFiles()
+        } catch {
+            errorMessage = "Temporary history from an interrupted save could not be removed: \(error.localizedDescription)"
+        }
         load()
     }
 
@@ -245,6 +251,10 @@ private final class HistoryPersistenceWriter: @unchecked Sendable {
         return lastResult
     }
 
+    func removeOrphanedTemporaryFiles() throws {
+        try queue.sync { try HistoryTemporaryFiles.removeOrphans(in: directory, fileManager: fileManager) }
+    }
+
     private func drain() {
         while true {
             lock.lock()
@@ -274,6 +284,9 @@ private final class HistoryPersistenceWriter: @unchecked Sendable {
         let historyURL = directory.appendingPathComponent("history.plist")
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        // A crash can bypass the previous process's defer. Remove those snapshots
+        // before saving, including when Clear replaces the canonical history.
+        try HistoryTemporaryFiles.removeOrphans(in: directory, fileManager: fileManager)
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         let data = try encoder.encode(HistoryArchive(version: 2, capacity: capacity, entries: entries))
@@ -289,5 +302,39 @@ private final class HistoryPersistenceWriter: @unchecked Sendable {
             try fileManager.moveItem(at: temporaryURL, to: historyURL)
         }
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: historyURL.path)
+    }
+}
+
+private enum HistoryTemporaryFiles {
+    static func removeOrphans(in directory: URL, fileManager: FileManager) throws {
+        // Pin the directory so path replacement cannot redirect deletion. Never
+        // follow a symbolic link or recursively delete a directory masquerading
+        // as one of our temporary files.
+        let descriptor = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return }
+            throw posixError()
+        }
+        defer { close(descriptor) }
+        var directoryInfo = stat()
+        guard fstat(descriptor, &directoryInfo) == 0 else { throw posixError() }
+        guard directoryInfo.st_uid == getuid() else { throw POSIXError(.EPERM) }
+
+        for name in try fileManager.contentsOfDirectory(atPath: directory.path) {
+            guard name.hasPrefix(".history-"), name.hasSuffix(".tmp") else { continue }
+            let identifier = String(name.dropFirst(".history-".count).dropLast(".tmp".count))
+            guard UUID(uuidString: identifier)?.uuidString == identifier else { continue }
+            var info = stat()
+            guard fstatat(descriptor, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
+                if errno == ENOENT { continue }
+                throw posixError()
+            }
+            guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), info.st_uid == getuid() else { continue }
+            guard unlinkat(descriptor, name, 0) == 0 || errno == ENOENT else { throw posixError() }
+        }
+    }
+
+    private static func posixError() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 }

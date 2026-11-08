@@ -6,7 +6,6 @@ struct SetupView: View {
     @ObservedObject var model: AppModel
     let finish: () -> Void
     @State private var step = 0
-    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -49,7 +48,7 @@ struct SetupView: View {
         .padding(30).frame(width: 490, height: 550)
         .background(Color(nsColor: .windowBackgroundColor))
         .tint(ClipTheme.accent).accentColor(ClipTheme.accent)
-        .onReceive(timer) { _ in model.refreshPermissions() }
+        .onAppear { model.refreshPermissions() }
     }
 
     private var title: String {

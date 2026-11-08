@@ -8,7 +8,6 @@ struct SettingsView: View {
     @State private var confirmClear = false
     @State private var confirmCapacityChange = false
     @State private var capacityDraft: Int
-    private let permissionTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     init(model: AppModel) {
         self.model = model
@@ -105,7 +104,6 @@ struct SettingsView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .tint(ClipTheme.accent)
         .accentColor(ClipTheme.accent)
-        .onReceive(permissionTimer) { _ in model.refreshPermissions() }
         .onAppear { model.refreshPermissions() }
         .onChange(of: store.capacity) { capacityDraft = $0 }
         .alert("Reduce history to \(capacityDraft) items?", isPresented: $confirmCapacityChange) {

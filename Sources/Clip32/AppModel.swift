@@ -2,6 +2,12 @@ import AppKit
 import Combine
 import ClipCore
 
+struct PermissionStatus: Equatable {
+    let accessibilityGranted: Bool
+    let loginEnabled: Bool
+    let loginStatus: String
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     let store: HistoryStore
@@ -27,9 +33,11 @@ final class AppModel: ObservableObject {
     var handleHistoryKey: ((NSEvent) -> Bool)?
     var previousApplication: NSRunningApplication?
     private var observers: [NSObjectProtocol] = []
+    private let permissionStatusProvider: (() -> PermissionStatus)?
 
-    init(demo: Bool = false) {
+    init(demo: Bool = false, permissionStatusProvider: (() -> PermissionStatus)? = nil) {
         isDemo = demo
+        self.permissionStatusProvider = permissionStatusProvider
         shortcut = HotKeyChoice(rawValue: UserDefaults.standard.string(forKey: "shortcut") ?? "") ?? .commandShiftC
         directPaste = UserDefaults.standard.object(forKey: "directPaste") as? Bool ?? true
         if demo {
@@ -55,9 +63,16 @@ final class AppModel: ObservableObject {
     }
 
     func refreshPermissions() {
-        accessibilityGranted = pasteService.accessibilityGranted
-        loginEnabled = login.isEnabled
-        loginStatus = login.statusDescription
+        let status = permissionStatusProvider?() ?? PermissionStatus(
+            accessibilityGranted: pasteService.accessibilityGranted,
+            loginEnabled: login.isEnabled,
+            loginStatus: login.statusDescription
+        )
+        // Activation, opening a window, and preference actions refresh this state.
+        // Repeated checks with no change must not invalidate every observing view.
+        if accessibilityGranted != status.accessibilityGranted { accessibilityGranted = status.accessibilityGranted }
+        if loginEnabled != status.loginEnabled { loginEnabled = status.loginEnabled }
+        if loginStatus != status.loginStatus { loginStatus = status.loginStatus }
     }
 
     func changeShortcut(_ choice: HotKeyChoice) {
@@ -107,10 +122,12 @@ final class AppModel: ObservableObject {
             message = "Copied. Switch to an app and press ⌘V."
             return
         }
-        pasteService.paste(into: target) { [weak self] succeeded in
+        guard let restoredChangeCount = monitor.restoredChangeCount else { return }
+        pasteService.paste(into: target, expectedChangeCount: restoredChangeCount) { [weak self] succeeded in
             if !succeeded {
-                self?.message = "Copied, but the app couldn’t receive a paste. Press ⌘V in the destination app."
-                self?.showHistory?()
+                // Cancellation can mean the user switched apps. Keep their focus
+                // and show feedback when they next open history themselves.
+                self?.message = "Paste was cancelled. Select the item again to retry."
             }
         }
     }
