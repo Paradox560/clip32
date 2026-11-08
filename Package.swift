@@ -8,6 +8,7 @@ let package = Package(
     targets: [
         .target(name: "ClipCore"),
         .executableTarget(name: "Clip32", dependencies: ["ClipCore"]),
-        .testTarget(name: "ClipCoreTests", dependencies: ["ClipCore"])
+        .testTarget(name: "ClipCoreTests", dependencies: ["ClipCore"]),
+        .testTarget(name: "Clip32Tests", dependencies: ["Clip32"])
     ]
 )
