@@ -6,8 +6,11 @@ import Foundation
 public final class ClipboardMonitor: ObservableObject {
     @Published public var isPaused = false {
         didSet {
+            guard isPaused != oldValue else { return }
             // Copies made while paused must not be captured when capture resumes.
             lastChangeCount = pasteboard.changeCount
+            if isPaused { stopPolling() }
+            else { startPollingIfNeeded() }
         }
     }
     @Published public private(set) var notice: String?
@@ -18,6 +21,9 @@ public final class ClipboardMonitor: ObservableObject {
     private let pasteboard: NSPasteboard
     private var lastChangeCount: Int
     private var timer: Timer?
+    private var isStarted = false
+    private var pollingGeneration: UUID?
+    private let schedulePolling: (@escaping @MainActor () -> Void) -> Timer
 
     public static let supportedTypes: [NSPasteboard.PasteboardType] = [
         .string, .rtf, .rtfd, .html, .png, .tiff, .URL, .fileURL
@@ -33,34 +39,61 @@ public final class ClipboardMonitor: ObservableObject {
         "Pasteboard generator type"
     ]
 
-    public init(store: HistoryStore, pasteboard: NSPasteboard = .general) {
+    public convenience init(store: HistoryStore, pasteboard: NSPasteboard = .general) {
+        self.init(store: store, pasteboard: pasteboard, schedulePolling: { action in
+            let timer = Timer(timeInterval: 0.4, repeats: true) { _ in
+                Task { @MainActor in action() }
+            }
+            timer.tolerance = 0.1
+            RunLoop.main.add(timer, forMode: .common)
+            return timer
+        })
+    }
+
+    /// An injectable scheduler keeps lifecycle tests independent of wall-clock timing.
+    init(store: HistoryStore, pasteboard: NSPasteboard,
+         schedulePolling: @escaping (@escaping @MainActor () -> Void) -> Timer) {
         self.store = store
         self.pasteboard = pasteboard
         self.lastChangeCount = pasteboard.changeCount
+        self.schedulePolling = schedulePolling
     }
 
     deinit { timer?.invalidate() }
 
     public func start() {
-        guard timer == nil else { return }
-        let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.captureNow() }
-        }
-        timer.tolerance = 0.1
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        isStarted = true
+        startPollingIfNeeded()
     }
 
     public func stop() {
+        isStarted = false
+        stopPolling()
+    }
+
+    private func startPollingIfNeeded() {
+        guard isStarted, !isPaused, timer == nil else { return }
+        let generation = UUID()
+        pollingGeneration = generation
+        timer = schedulePolling { [weak self] in
+            guard let self, self.pollingGeneration == generation,
+                  self.isStarted, !self.isPaused else { return }
+            self.captureNow()
+        }
+    }
+
+    private func stopPolling() {
+        // Invalidate callbacks already queued by a timer before it was cancelled.
+        pollingGeneration = nil
         timer?.invalidate()
         timer = nil
     }
 
     public func captureNow() {
+        guard !isPaused else { return }
         let observedCount = pasteboard.changeCount
         guard observedCount != lastChangeCount else { return }
         lastChangeCount = observedCount
-        guard !isPaused else { return }
         guard let pasteboardItems = pasteboard.pasteboardItems, !pasteboardItems.isEmpty else { return }
 
         if pasteboardItems.contains(where: { item in
