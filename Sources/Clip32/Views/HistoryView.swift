@@ -3,32 +3,17 @@ import SwiftUI
 import ClipCore
 import ImageIO
 
-private enum HistoryFilter: String, CaseIterable {
-    case all = "All", text = "Text", images = "Images", files = "Files", pinned = "Pinned"
-}
-
 struct HistoryView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: HistoryStore
     @ObservedObject var monitor: ClipboardMonitor
     @State private var query = ""
-    @State private var filter: HistoryFilter = .all
+    @State private var filter: ClipboardHistoryFilter = .all
+    @StateObject private var search = HistorySearchModel()
     @State private var selected: UUID?
     @FocusState private var searchFocused: Bool
 
-    private var entries: [ClipboardEntry] {
-        store.entries.filter { entry in
-            let matchesType: Bool
-            switch filter {
-            case .all: matchesType = true
-            case .text: matchesType = entry.kind == .text
-            case .images: matchesType = entry.kind == .image
-            case .files: matchesType = entry.kind == .files
-            case .pinned: matchesType = entry.isPinned
-            }
-            return matchesType && (query.isEmpty || entry.searchableText.localizedCaseInsensitiveContains(query))
-        }
-    }
+    private var entries: [ClipboardEntry] { search.entries }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,10 +46,9 @@ struct HistoryView: View {
                 .padding(.horizontal, 20)
 
             HStack(spacing: 4) {
-                ForEach(HistoryFilter.allCases, id: \.self) { item in
+                ForEach(ClipboardHistoryFilter.allCases, id: \.self) { item in
                     Button {
                         filter = item
-                        selected = entries.first?.id
                     } label: {
                         HStack(spacing: 4) {
                             if item == .pinned { Image(systemName: "pin.fill").font(.system(size: 9)) }
@@ -108,7 +92,11 @@ struct HistoryView: View {
                 ScrollView {
                     if entries.isEmpty {
                         VStack(spacing: 12) {
-                            Image(systemName: query.isEmpty ? "doc.on.clipboard" : "magnifyingglass").font(.system(size: 34, weight: .light)).foregroundStyle(.tertiary)
+                            if search.isSearching {
+                                ProgressView().controlSize(.small).padding(8)
+                            } else {
+                                Image(systemName: query.isEmpty ? "doc.on.clipboard" : "magnifyingglass").font(.system(size: 34, weight: .light)).foregroundStyle(.tertiary)
+                            }
                             Text(emptyTitle).font(.system(size: 15, weight: .medium))
                             Text(emptyDescription).font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 260)
                         }.frame(maxWidth: .infinity).padding(.vertical, 65)
@@ -116,6 +104,7 @@ struct HistoryView: View {
                         LazyVStack(spacing: 5) {
                             ForEach(entries) { entry in
                                 HistoryRow(entry: entry, selected: entry.id == selected,
+                                    search: search, presentationRevision: search.presentationRevision,
                                     choose: { model.choose(entry) },
                                     copy: { model.choose(entry, copyOnly: true) },
                                     pin: { store.togglePin(id: entry.id) },
@@ -159,17 +148,21 @@ struct HistoryView: View {
             selected = store.entries.first?.id
             searchFocused = true
         }
-        .onChange(of: query) { _ in selected = entries.first?.id }
-        .onChange(of: store.entries) { _ in
+        .onReceive(store.$entries) { search.replaceEntries($0) }
+        .onChange(of: query) { value in selected = nil; search.setQuery(value) }
+        .onChange(of: filter) { value in selected = nil; search.setFilter(value) }
+        .onChange(of: search.entries) { _ in
             if !entries.contains(where: { $0.id == selected }) { selected = entries.first?.id }
         }
     }
 
     private var emptyTitle: String {
+        if search.isSearching { return "Searching your clips…" }
         if !query.isEmpty { return "No matching clips" }
         return filter == .pinned ? "Keep your favorites close" : "Your next copy starts here"
     }
     private var emptyDescription: String {
+        if search.isSearching { return "" }
         if !query.isEmpty { return "Try another word or switch to All." }
         if filter == .pinned { return "Pin an item from its menu to keep it in your history." }
         return "Copy text, an image, or a file with ⌘C. Your last \(store.capacity) items will be right here."
@@ -203,13 +196,18 @@ struct HistoryView: View {
 private struct HistoryRow: View {
     let entry: ClipboardEntry
     let selected: Bool
+    let search: HistorySearchModel
+    let presentationRevision: UInt64
     let choose: () -> Void
     let copy: () -> Void
     let pin: () -> Void
     let delete: () -> Void
     @State private var hovered = false
+    @State private var presentation: ClipboardPresentation?
+    @State private var presentedItems: [ClipboardItem]?
 
     var body: some View {
+        let title = presentation?.title ?? "Loading preview…"
         HStack(alignment: .top, spacing: 10) {
             Button(action: choose) {
                 HStack(alignment: .top, spacing: 11) {
@@ -222,7 +220,7 @@ private struct HistoryRow: View {
                         }
                     }.accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(entry.title).font(.system(size: 12, weight: .medium)).lineLimit(2).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+                        Text(title).font(.system(size: 12, weight: .medium)).lineLimit(2).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
                         HStack(spacing: 5) {
                             if entry.isPinned { Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(Color.accentColor) }
                             Text(entry.sourceApp ?? kindLabel).lineLimit(1)
@@ -231,7 +229,7 @@ private struct HistoryRow: View {
                         }.font(.system(size: 10)).foregroundStyle(.secondary)
                     }.padding(.top, 2)
                 }.contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityLabel("\(entry.isPinned ? "Pinned, " : "")\(entry.title). Select clipboard item.")
+            }.buttonStyle(.plain).accessibilityLabel("\(entry.isPinned ? "Pinned, " : "")\(title). Select clipboard item.")
             Menu {
                 Button("Paste", action: choose)
                 Button("Copy without pasting", action: copy)
@@ -240,7 +238,7 @@ private struct HistoryRow: View {
                 Button("Delete", role: .destructive, action: delete)
             } label: { Image(systemName: "ellipsis").frame(width: 18, height: 22) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().foregroundStyle(.secondary)
-                .opacity(hovered || selected || entry.isPinned ? 1 : 0.45).accessibilityLabel("Actions for \(entry.title)")
+                .opacity(hovered || selected || entry.isPinned ? 1 : 0.45).accessibilityLabel("Actions for \(title)")
         }
         .padding(.horizontal, 10).padding(.vertical, 11)
         .background(selected ? Color.accentColor.opacity(0.10) : hovered ? Color.primary.opacity(0.035) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
@@ -251,7 +249,14 @@ private struct HistoryRow: View {
             Button(entry.isPinned ? "Unpin" : "Pin", action: pin)
             Button("Delete", role: .destructive, action: delete)
         }
-        .help(entry.preview)
+        .help(presentation?.preview ?? "")
+        .task(id: presentationRevision) {
+            if presentedItems != entry.items { presentation = nil }
+            if let value = await search.presentation(for: entry), !Task.isCancelled {
+                presentedItems = entry.items
+                presentation = value
+            }
+        }
     }
 
     private var icon: String { entry.kind == .image ? "photo" : entry.kind == .files ? "doc" : "text.alignleft" }

@@ -98,33 +98,42 @@ public struct ClipboardEntry: Codable, Equatable, Identifiable, Sendable {
         case .image:
             return "Copied image"
         case .text:
-            // Build only the displayed portion. Splitting the entire copied text
-            // would scan megabytes on the UI thread just to display 140 characters.
-            var result = ""
-            var count = 0
-            var pendingSpace = false
-            for character in presentationText {
-                if character.isNewline {
-                    if !result.isEmpty { break }
-                    continue
-                }
-                if character.isWhitespace {
-                    if !result.isEmpty { pendingSpace = true }
-                    continue
-                }
-                if pendingSpace {
-                    // Do not leave a trailing separator when the limit is reached.
-                    guard count + 1 < 140 else { break }
-                    result.append(" ")
-                    count += 1
-                    pendingSpace = false
-                }
-                result.append(character)
-                count += 1
-                if count == 140 { break }
-            }
-            return result.isEmpty ? "Formatted text" : result
+            return Self.compactTitle(presentationText)
         }
+    }
+
+    /// Resolve both row strings together so an RTF-only entry is imported once.
+    public var displayText: (title: String, preview: String) {
+        guard kind == .text else { return (title, preview) }
+        let text = presentationText
+        return (Self.compactTitle(text), String(text.prefix(800)))
+    }
+
+    private static func compactTitle(_ text: String) -> String {
+        // Build only the displayed portion instead of splitting a whole copy.
+        var result = ""
+        var count = 0
+        var pendingSpace = false
+        for character in text {
+            if character.isNewline {
+                if !result.isEmpty { break }
+                continue
+            }
+            if character.isWhitespace {
+                if !result.isEmpty { pendingSpace = true }
+                continue
+            }
+            if pendingSpace {
+                guard count + 1 < 140 else { break }
+                result.append(" ")
+                count += 1
+                pendingSpace = false
+            }
+            result.append(character)
+            count += 1
+            if count == 140 { break }
+        }
+        return result.isEmpty ? "Formatted text" : result
     }
 
     public var preview: String {
