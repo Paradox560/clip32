@@ -10,7 +10,7 @@ It starts with **32 entries**. Choose any history size from **1 to 256** in Sett
 
 ## Install the Mac app
 
-Download **`Clip32-1.1.0-universal.dmg`** from the [v1.1.0 release](https://github.com/Paradox560/clip32/releases/tag/v1.1.0). The universal app supports **Apple silicon and Intel Macs running macOS 13 or later**. You do not need Xcode, Swift, an account, or any developer tools to use the packaged app.
+Download **`Clip32-1.1.1-universal.dmg`** from the [v1.1.1 release](https://github.com/Paradox560/clip32/releases/tag/v1.1.1). The universal app supports **Apple silicon and Intel Macs running macOS 13 or later**. You do not need Xcode, Swift, an account, or any developer tools to use the packaged app.
 
 **Preview signing status:** this release is ad-hoc signed and has **not been notarized by Apple**. Gatekeeper may block a downloaded copy. A Developer ID-signed, notarized release is required for normal downloaded-app approval; the project includes that release workflow, but this preview does not claim that approval.
 
@@ -111,6 +111,7 @@ This signs with the hardened runtime, submits the app and DMG for notarization, 
 - `Sources/ClipCore`: clipboard capture, history limits, pinning, and persistent storage.
 - `Sources/Clip32`: menu bar app, native views, setup guide, hotkey, login, and paste integration.
 - `Tests/ClipCoreTests`: behavior tests using temporary files and synthetic named pasteboards, without reading your real clipboard history.
+- `Tests/Clip32Tests`: login-item upgrade and preference tests using mock services, without changing real startup settings.
 - `Scripts`: app and icon generation, local installation, and DMG packaging.
 
 The app name remains **Clip32**. Its paperclip logo contains no text or capacity number.
