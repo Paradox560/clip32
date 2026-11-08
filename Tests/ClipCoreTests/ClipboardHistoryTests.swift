@@ -426,7 +426,7 @@ final class ClipboardHistoryTests: XCTestCase {
             XCTAssertTrue(store.setCapacity(64))
             store.flush()
             let archive = try PropertyListSerialization.propertyList(from: Data(contentsOf: archiveURL), format: nil) as? [String: Any]
-            XCTAssertEqual(archive?["version"] as? Int, 2)
+            XCTAssertEqual(archive?["version"] as? Int, 3)
             XCTAssertEqual(archive?["capacity"] as? Int, 64)
             let reloaded = HistoryStore(directory: directory)
             XCTAssertEqual(reloaded.capacity, 64)

@@ -1,5 +1,4 @@
 import Combine
-import Darwin
 import Foundation
 
 @MainActor
@@ -80,6 +79,9 @@ public final class HistoryStore: ObservableObject {
         if let matchingEntry {
             newestEntry.id = matchingEntry.id
             newestEntry.isPinned = matchingEntry.isPinned
+        } else if entries.contains(where: { $0.id == newestEntry.id }) {
+            // Caller-supplied UUIDs must not alias two different payloads.
+            newestEntry.id = UUID()
         }
         var updatedEntries = entries.filter { !$0.hasSameContent(as: entry) }
         var updatedBytes = updatedEntries.reduce(0) { $0 + $1.byteCount }
@@ -132,34 +134,12 @@ public final class HistoryStore: ObservableObject {
     private func load() {
         guard fileManager.fileExists(atPath: historyURL.path) else { return }
         do {
-            let attributes = try fileManager.attributesOfItem(atPath: historyURL.path)
-            let byteCount = (attributes[.size] as? NSNumber)?.uint64Value ?? UInt64.max
-            // Includes every valid v1 archive, with bounded metadata overhead.
-            guard byteCount <= UInt64(Self.maximumHistoryBytes + 4 * 1_024 * 1_024) else {
-                throw HistoryError.invalidArchive
-            }
-            let data = try Data(contentsOf: historyURL, options: .mappedIfSafe)
-            let archive = try PropertyListDecoder().decode(HistoryArchive.self, from: data)
-            guard archive.version == 1 || archive.version == 2 else {
-                throw HistoryError.unsupportedVersion
-            }
-            let savedCapacity: Int
-            if archive.version == 1 {
-                savedCapacity = Self.defaultCapacity
-            } else if let value = archive.capacity, (Self.minimumCapacity...Self.maximumCapacity).contains(value) {
-                savedCapacity = value
-            } else {
-                throw HistoryError.invalidArchive
-            }
-            // Validate the archive rather than silently accepting a partially damaged history.
-            guard archive.entries.count <= savedCapacity,
-                  archive.entries.reduce(0, { $0 + $1.byteCount }) <= historyByteLimit,
-                  archive.entries.allSatisfy({ !$0.items.isEmpty && $0.byteCount <= Self.maximumEntryBytes && $0.items.allSatisfy({ !$0.representations.isEmpty }) }) else {
-                throw HistoryError.invalidArchive
-            }
-            capacity = savedCapacity
-            entries = archive.entries
-            try protectStorage()
+            let loaded = try writer.load(historyByteLimit: historyByteLimit)
+            capacity = loaded.capacity
+            entries = loaded.entries
+            // Payloads are committed before the manifest replaces the legacy file.
+            // Migration is queued so startup does not wait for its disk writes.
+            if loaded.needsMigration { save() }
         } catch {
             canPersist = false
             errorMessage = "Saved history could not be opened. New copies will be kept only for this session. The saved file is untouched. Clear history to reset it. (\(error.localizedDescription))"
@@ -182,159 +162,4 @@ public final class HistoryStore: ObservableObject {
         errorMessage = result.errorMessage
     }
 
-    private func protectStorage() throws {
-        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: historyURL.path)
-    }
-
-    private enum HistoryError: LocalizedError {
-        case unsupportedVersion, invalidArchive
-
-        var errorDescription: String? {
-            switch self {
-            case .unsupportedVersion: return "The history format is not supported by this version of Clip32."
-            case .invalidArchive: return "The history file contains invalid entries."
-            }
-        }
-    }
-}
-
-private struct HistoryArchive: Codable {
-    let version: Int
-    let capacity: Int?
-    let entries: [ClipboardEntry]
-}
-
-/// All filesystem mutations use one serial queue. The lock only protects the small
-/// handoff state, so incoming copies replace queued snapshots instead of accumulating.
-private final class HistoryPersistenceWriter: @unchecked Sendable {
-    struct WriteResult: Sendable {
-        let generation: Int
-        let errorMessage: String?
-    }
-
-    private struct Snapshot: Sendable {
-        let entries: [ClipboardEntry]
-        let capacity: Int
-        let generation: Int
-    }
-
-    private let directory: URL
-    private let fileManager: FileManager
-    private let completion: @Sendable (WriteResult) -> Void
-    private let queue = DispatchQueue(label: "Clip32.history-writer", qos: .utility)
-    private let lock = NSLock()
-    // These three fields are accessed only while holding lock.
-    private var pending: Snapshot?
-    private var isScheduled = false
-    private var lastResult: WriteResult?
-
-    init(directory: URL, fileManager: FileManager, completion: @escaping @Sendable (WriteResult) -> Void) {
-        self.directory = directory
-        self.fileManager = fileManager
-        self.completion = completion
-    }
-
-    func submit(entries: [ClipboardEntry], capacity: Int, generation: Int) {
-        lock.lock()
-        pending = Snapshot(entries: entries, capacity: capacity, generation: generation)
-        let needsScheduling = !isScheduled
-        isScheduled = true
-        lock.unlock()
-        if needsScheduling { queue.async { self.drain() } }
-    }
-
-    func flush() -> WriteResult? {
-        queue.sync {}
-        lock.lock()
-        defer { lock.unlock() }
-        return lastResult
-    }
-
-    func removeOrphanedTemporaryFiles() throws {
-        try queue.sync { try HistoryTemporaryFiles.removeOrphans(in: directory, fileManager: fileManager) }
-    }
-
-    private func drain() {
-        while true {
-            lock.lock()
-            guard let snapshot = pending else {
-                isScheduled = false
-                lock.unlock()
-                return
-            }
-            pending = nil
-            lock.unlock()
-
-            let result: WriteResult
-            do {
-                try persist(snapshot.entries, capacity: snapshot.capacity)
-                result = WriteResult(generation: snapshot.generation, errorMessage: nil)
-            } catch {
-                result = WriteResult(generation: snapshot.generation, errorMessage: "History could not be saved and is currently kept in memory: \(error.localizedDescription)")
-            }
-            lock.lock()
-            lastResult = result
-            lock.unlock()
-            completion(result)
-        }
-    }
-
-    private func persist(_ entries: [ClipboardEntry], capacity: Int) throws {
-        let historyURL = directory.appendingPathComponent("history.plist")
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-        // A crash can bypass the previous process's defer. Remove those snapshots
-        // before saving, including when Clear replaces the canonical history.
-        try HistoryTemporaryFiles.removeOrphans(in: directory, fileManager: fileManager)
-        let encoder = PropertyListEncoder()
-        encoder.outputFormat = .binary
-        let data = try encoder.encode(HistoryArchive(version: 2, capacity: capacity, entries: entries))
-        // Write through an owner-only temporary file before replacing the archive.
-        let temporaryURL = directory.appendingPathComponent(".history-\(UUID().uuidString).tmp")
-        defer { try? fileManager.removeItem(at: temporaryURL) }
-        guard fileManager.createFile(atPath: temporaryURL.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        if fileManager.fileExists(atPath: historyURL.path) {
-            _ = try fileManager.replaceItemAt(historyURL, withItemAt: temporaryURL)
-        } else {
-            try fileManager.moveItem(at: temporaryURL, to: historyURL)
-        }
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: historyURL.path)
-    }
-}
-
-private enum HistoryTemporaryFiles {
-    static func removeOrphans(in directory: URL, fileManager: FileManager) throws {
-        // Pin the directory so path replacement cannot redirect deletion. Never
-        // follow a symbolic link or recursively delete a directory masquerading
-        // as one of our temporary files.
-        let descriptor = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-        guard descriptor >= 0 else {
-            if errno == ENOENT { return }
-            throw posixError()
-        }
-        defer { close(descriptor) }
-        var directoryInfo = stat()
-        guard fstat(descriptor, &directoryInfo) == 0 else { throw posixError() }
-        guard directoryInfo.st_uid == getuid() else { throw POSIXError(.EPERM) }
-
-        for name in try fileManager.contentsOfDirectory(atPath: directory.path) {
-            guard name.hasPrefix(".history-"), name.hasSuffix(".tmp") else { continue }
-            let identifier = String(name.dropFirst(".history-".count).dropLast(".tmp".count))
-            guard UUID(uuidString: identifier)?.uuidString == identifier else { continue }
-            var info = stat()
-            guard fstatat(descriptor, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
-                if errno == ENOENT { continue }
-                throw posixError()
-            }
-            guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), info.st_uid == getuid() else { continue }
-            guard unlinkat(descriptor, name, 0) == 0 || errno == ENOENT else { throw posixError() }
-        }
-    }
-
-    private static func posixError() -> POSIXError {
-        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-    }
 }
