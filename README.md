@@ -10,7 +10,7 @@ It starts with **32 entries**. Choose any history size from **1 to 256** in Sett
 
 ## Install the Mac app
 
-Download **`Clip32-1.1.1-universal.dmg`** from the [v1.1.1 release](https://github.com/Paradox560/clip32/releases/tag/v1.1.1). The universal app supports **Apple silicon and Intel Macs running macOS 13 or later**. You do not need Xcode, Swift, an account, or any developer tools to use the packaged app.
+Download **`Clip32-1.2.0-universal.dmg`** from the [v1.2.0 release](https://github.com/Paradox560/clip32/releases/tag/v1.2.0). The universal app supports **Apple silicon and Intel Macs running macOS 13 or later**. You do not need Xcode, Swift, an account, or any developer tools to use the packaged app.
 
 **Preview signing status:** this release is ad-hoc signed and has **not been notarized by Apple**. Gatekeeper may block a downloaded copy. A Developer ID-signed, notarized release is required for normal downloaded-app approval; the project includes that release workflow, but this preview does not claim that approval.
 
@@ -52,9 +52,13 @@ History also has a **512 MiB total payload limit** and a **16 MiB limit per entr
 
 File entries retain **references to their original locations**, not copies of the file contents. Moved or deleted files cannot be restored from Clip32. Rich text and supported image representations are preserved. Capture starts with new copies after Clip32 opens, and saved history survives app and computer restarts.
 
+Version 1.2.0 stores clip contents in separate payload files and keeps order, pins, and settings in a small history index. Pinning or reordering no longer rewrites all saved content. Existing version 1 and 2 archives migrate automatically. Older app versions cannot read the new format; continue using 1.2.0 or newer after migration.
+
+Search runs off the main thread and reuses parsed text within a bounded cache. Selection changes reuse the current results. Pausing capture stops clipboard polling entirely; copies made while paused stay excluded when capture resumes. The payload limit is not a process-memory limit: parsing, images, and temporary save data also use memory.
+
 ## Privacy
 
-Clip32 does not upload clipboard contents or sync them to the cloud. History is stored locally in `~/Library/Application Support/Clip32`. Its directory uses owner-only `0700` permissions and its history file uses `0600`; the stored history is **not encrypted**.
+Clip32 does not upload clipboard contents or sync them to the cloud. History is stored locally in `~/Library/Application Support/Clip32`. Its directory uses owner-only `0700` permissions and its history files use `0600`; the stored history is **not encrypted**.
 
 Common password-manager confidential, concealed, and transient clipboard markers are excluded. Sensitive content copied by an app that does not supply those markers can still be recorded. Pause capture before copying something you do not want saved, or delete it from history afterward.
 
@@ -110,8 +114,10 @@ This signs with the hardened runtime, submits the app and DMG for notarization, 
 
 - `Sources/ClipCore`: clipboard capture, history limits, pinning, and persistent storage.
 - `Sources/Clip32`: menu bar app, native views, setup guide, hotkey, login, and paste integration.
-- `Tests/ClipCoreTests`: behavior tests using temporary files and synthetic named pasteboards, without reading your real clipboard history.
-- `Tests/Clip32Tests`: login-item upgrade and preference tests using mock services, without changing real startup settings.
+- `Tests/ClipCoreTests`: capture, storage migration/recovery, search-cache, and history-limit tests using synthetic data and temporary files.
+- `Tests/Clip32Tests`: search, permission, paste, and login-item tests using mock services, without changing real startup settings or posting paste events.
 - `Scripts`: app and icon generation, local installation, and DMG packaging.
+- `Scripts/Benchmarks`: reproducible synthetic performance measurements.
+- `docs/audits`: findings, measurements, and follow-up validation.
 
 The app name remains **Clip32**. Its paperclip logo contains no text or capacity number.

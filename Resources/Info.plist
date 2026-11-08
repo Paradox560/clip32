@@ -4,8 +4,8 @@
   <key>CFBundleName</key><string>Clip32</string>
   <key>CFBundleDisplayName</key><string>Clip32</string>
   <key>CFBundleIdentifier</key><string>com.pranavpalle.clip32</string>
-  <key>CFBundleVersion</key><string>3</string>
-  <key>CFBundleShortVersionString</key><string>1.1.1</string>
+  <key>CFBundleVersion</key><string>4</string>
+  <key>CFBundleShortVersionString</key><string>1.2.0</string>
   <key>CFBundleExecutable</key><string>Clip32</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>

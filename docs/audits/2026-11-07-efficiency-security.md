@@ -35,7 +35,9 @@ The process sample reported a lifetime peak footprint of about 525 MB with an un
 
 5. **Remove interrupted-save snapshots.** Startup and subsequent saves remove strictly named, current-user-owned regular `.history-UUID.tmp` files. Cleanup pins the directory descriptor, refuses a symlink at that directory path, does not follow entry symlinks, and never deletes recursively. Three tests cover startup/Clear cleanup and preservation of unrelated files, directories, symlinks, and corrupt canonical history. Startup and Clear fixtures failed before the change.
 
-## Remaining priorities
+## Initial remaining priorities
+
+These findings were addressed in the subsequent 1.2.0 work described below.
 
 | Priority | Finding and evidence | Recommended work |
 | --- | --- | --- |
@@ -52,3 +54,48 @@ History remains plaintext in an owner-only directory/file (0700/0600). This does
 No application-runtime network client, shell execution, remote-content renderer, or third-party package dependency was found in the reviewed source. Rich text and images rely on Apple parsers. The installed baseline is ad-hoc signed with hardened runtime; Developer ID signing and notarization remain outstanding distribution requirements.
 
 The combined suite passed **54/54 tests**: 22 history, 7 presentation, 2 clipboard privacy/receipt, 3 temporary-file cleanup, 10 login-item, 7 paste-service, and 3 permission-refresh tests. Optimized arm64 and x86_64 builds passed. `git diff --check` passed. The new [presentation benchmark](../../Scripts/Benchmarks/ClipboardPresentation.swift) includes reproduction commands. CPU/energy improvement after the local fixes has not been measured in a controlled running-app comparison.
+
+## Follow-up: version 1.2.0
+
+At the user's request, the three remaining performance findings were implemented after the initial assessment.
+
+### Incremental persistence
+
+Version 3 separates immutable clip payloads from a small atomic `history.plist` index. Payloads are written and synchronized before the index references them. Pinning, reordering, and capacity changes reuse unchanged payload files. Successful commits and valid loads remove unreferenced payloads; corrupt histories preserve recovery data until explicit Clear. Reads validate checksums, ownership, file type, size, and identifiers. Independent review caught a named-pipe startup hang, fixed with nonblocking opens before file-type validation.
+
+Valid v1/v2 histories migrate automatically, preserving order, content, pins, and capacity. No old full-archive backup is retained. **Version 1.1.1 cannot read the migrated format**; use 1.2.0 or newer after migration.
+
+The same release-optimized synthetic fixture was run against `24bbc5a` and the new storage implementation: 16 entries of 1 MiB each, flushing after each operation. Logical bytes count the changed files, not physical SSD writes or filesystem amplification.
+
+| Operation | Whole archive | Separate payloads |
+| --- | ---: | ---: |
+| Initial insertion writes | 142,627,836 bytes | 16,805,396 bytes |
+| Ten pin-toggle writes | 167,795,740 bytes | 28,240 bytes |
+| Mean pin-toggle time | 6.105 ms | 0.682 ms |
+| Ten recopy/reorder writes | 167,795,740 bytes | 28,240 bytes |
+| Mean recopy/reorder time | 6.098 ms | 0.988 ms |
+
+Pin/reorder writes fell by 99.983%. Payload file identities, modification times, and contents stayed unchanged; reloaded entries matched. Thirty-five targeted storage/history tests passed, including ten new migration, failure, cleanup, file-type, and payload-reuse tests. Reproduce with [HistoryStorageBenchmark.swift](../../Scripts/Benchmarks/HistoryStorageBenchmark.swift).
+
+### Search, presentation, and paused capture
+
+Search now runs on a serial background worker with one running and one replaceable pending request. It caches parsed text with a 32 MiB content budget, invalidates changed/removed clips, and materializes results once per query/filter/history change. Navigation reuses those results. New queries clear old actionable results, and completion checks reject superseded requests. Rich-text row presentation runs off the main thread and uses a separate 2 MiB content cache. These budgets account for cached text; they are not process-memory ceilings.
+
+Pausing capture invalidates its timer. Resume resets the change-count baseline and restarts polling only if monitoring is still started. Generation checks reject callbacks queued by old timers. Four lifecycle tests cover pause/resume, explicit start/stop, repeated assignments, and skipped paused copies.
+
+The optimized search fixture contains 256 RTF-only clips totaling 8,147,858 payload bytes. The benchmark runs the prior full-text scan and the new index over identical data:
+
+| Measurement | Previous behavior | New behavior |
+| --- | ---: | ---: |
+| Search scan | 102.56 ms | 41.85 ms warm |
+| First indexed search | — | 103.25 ms, on the background worker |
+| Twelve-row presentation | 6.17 ms | 3.14 ms cold; 0.0118 ms cached |
+| Parsed-text cache charge | — | 24,204,726 bytes, below 32 MiB |
+
+Cold parsing still costs CPU time; moving it off the main thread protects responsiveness rather than eliminating that work. Navigation reads materialized results without rescanning. Reproduce with [ClipboardSearch.swift](../../Scripts/Benchmarks/ClipboardSearch.swift).
+
+Cross-review also found that cancelled row previews retained queued payload snapshots. Presentation jobs now coalesce by ID/revision, have a maximum of 256 pending IDs, carry no payload snapshots, and complete cancelled waiters promptly. The independent synthetic retention probe improved from 0/8 cancelled requests completed/released to 8/8 while the worker remained suspended. No further concrete cross-review findings remained.
+
+The final integrated suite passed **82/82 tests**, including 14 new search/cache/async-model tests. Fixtures cover stale results, main-thread avoidance, Unicode and full-tail matching, cache budgets, mutations, initial presentation readiness, and cancellation while the worker is suspended.
+
+The 1.2.0 release build compiled for Apple silicon and Intel. Native demo rendering confirmed populated history rows and the Settings/setup screens using synthetic data; the Settings version label now reads bundle metadata. The universal app occupies approximately 4.35 MiB on disk. DMG checksum verification, mounted bundle identity, code-signature validation, and executable comparison passed. The DMG remains ad-hoc signed and unnotarized. No controlled post-change idle CPU/RAM measurement is claimed.

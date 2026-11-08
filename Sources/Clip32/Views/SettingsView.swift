@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var confirmClear = false
     @State private var confirmCapacityChange = false
     @State private var capacityDraft: Int
+    private let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development"
 
     init(model: AppModel) {
         self.model = model
@@ -95,7 +96,7 @@ struct SettingsView: View {
 
             HStack {
                 Button("Setup guide…") { model.showSetup?() }.controlSize(.small)
-                Text("1.1 · Stored locally").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text("\(appVersion) · Stored locally").font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Quit Clip32") { NSApp.terminate(nil) }.controlSize(.small)
             }.padding(.horizontal, 24).padding(.vertical, 16)
